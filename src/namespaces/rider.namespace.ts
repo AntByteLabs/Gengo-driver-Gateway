@@ -28,20 +28,33 @@ export function setupRiderNamespace(io: Server): Namespace {
     // 1. Join personal room
     await socket.join(`rider:${riderId}`);
 
-    // 2. Rejoin active trip room if one exists (reconnect scenario)
+    // 2. Join trip room. Redis is the source of truth — the handshake's
+    // tripId is treated as a hint and only honoured when it matches what
+    // Redis has recorded for this rider. Without this check a client could
+    // pass any tripId at connect time and listen to (or send chat into)
+    // somebody else's trip room.
+    const handshakeTripId = (socket.handshake.auth as { tripId?: string })?.tripId;
+    let tripId: string | null = null;
     try {
-      const activeTripId = await resolveRiderActiveTrip(riderId);
-      if (activeTripId) {
-        await socket.join(`trip:${activeTripId}`);
-        logger.debug({ riderId, activeTripId }, 'Rider rejoined active trip room');
-      }
+      tripId = await resolveRiderActiveTrip(riderId);
     } catch (err) {
-      logger.warn({ err, riderId }, 'Failed to rejoin rider active trip room');
+      logger.warn({ err, riderId }, 'Failed to resolve rider active trip');
+    }
+    if (handshakeTripId && handshakeTripId !== tripId) {
+      logger.warn(
+        { riderId, handshakeTripId, activeTripId: tripId },
+        'Ignoring handshake tripId — does not match rider’s active trip in Redis',
+      );
+    }
+    if (tripId) {
+      await socket.join(`trip:${tripId}`);
+      socket.data.activeTripId = tripId;
+      logger.debug({ riderId, tripId }, 'Rider joined trip room');
     }
 
     // 3. Register all event handlers
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    registerRiderHandlers(socket as any, driverNsp, riderNsp);
+    registerRiderHandlers(socket as any, driverNsp);
   });
 
   return riderNsp;

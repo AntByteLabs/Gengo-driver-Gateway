@@ -2,7 +2,7 @@ import express from 'express';
 import { createServer } from 'node:http';
 import { Server } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { config } from './config.js';
 import { logger } from './logger.js';
 import { setupDriverNamespace } from './namespaces/driver.namespace.js';
@@ -50,10 +50,10 @@ const io = new Server(httpServer, {
 const adapterPubClient = new Redis(config.REDIS_URL);
 const adapterSubClient = adapterPubClient.duplicate();
 
-adapterPubClient.on('error', (err) =>
+adapterPubClient.on('error', (err: Error) =>
   logger.error({ err }, 'Socket.io Redis adapter pub error'),
 );
-adapterSubClient.on('error', (err) =>
+adapterSubClient.on('error', (err: Error) =>
   logger.error({ err }, 'Socket.io Redis adapter sub error'),
 );
 

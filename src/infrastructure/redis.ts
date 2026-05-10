@@ -1,4 +1,4 @@
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
@@ -12,14 +12,14 @@ export function getRedisDataClient(): Redis {
       lazyConnect: false,
       enableReadyCheck: true,
       maxRetriesPerRequest: 3,
-      retryStrategy: (times) => {
+      retryStrategy: (times: number) => {
         if (times > 10) return null;
         return Math.min(times * 200, 3000);
       },
     });
 
     _dataClient.on('connect', () => logger.info('Redis data client connected'));
-    _dataClient.on('error', (err) => logger.error({ err }, 'Redis data client error'));
+    _dataClient.on('error', (err: Error) => logger.error({ err }, 'Redis data client error'));
     _dataClient.on('close', () => logger.warn('Redis data client connection closed'));
   }
   return _dataClient;

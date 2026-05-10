@@ -1,4 +1,4 @@
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
@@ -12,13 +12,13 @@ export function getRedisPubsubClient(): Redis {
       lazyConnect: false,
       enableReadyCheck: true,
       maxRetriesPerRequest: null, // subscriber mode — retry indefinitely
-      retryStrategy: (times) => {
+      retryStrategy: (times: number) => {
         return Math.min(times * 300, 5000);
       },
     });
 
     _pubsubClient.on('connect', () => logger.info('Redis pubsub client connected'));
-    _pubsubClient.on('error', (err) => logger.error({ err }, 'Redis pubsub client error'));
+    _pubsubClient.on('error', (err: Error) => logger.error({ err }, 'Redis pubsub client error'));
     _pubsubClient.on('close', () => logger.warn('Redis pubsub client connection closed'));
   }
   return _pubsubClient;

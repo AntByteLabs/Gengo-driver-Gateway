@@ -29,17 +29,29 @@ export function setupDriverNamespace(io: Server): Namespace {
     // 1. Join personal room
     await socket.join(`driver:${driverId}`);
 
-    // 2. Rejoin active trip room if one exists (reconnect scenario)
+    // 2. Rejoin active trip room. Redis is the source of truth — the
+    // handshake-supplied tripId is treated as a *hint* and only honoured when
+    // it matches what Redis has recorded for this driver. Without this check,
+    // a client could pass an arbitrary tripId on connect and read every
+    // event emitted into that trip room (status, location, chat, bargain
+    // offers).
+    const handshakeTripId = (socket.handshake.auth as { tripId?: string })?.tripId;
+    let activeTripId: string | null = null;
     try {
-      const activeTripId = await resolveDriverActiveTrip(driverId);
-      if (activeTripId) {
-        await socket.join(`trip:${activeTripId}`);
-        // Store on socket.data so the location handler can fan out to the rider room
-        socket.data.activeTripId = activeTripId;
-        logger.debug({ driverId, activeTripId }, 'Driver rejoined active trip room');
-      }
+      activeTripId = await resolveDriverActiveTrip(driverId);
     } catch (err) {
-      logger.warn({ err, driverId }, 'Failed to rejoin driver active trip room');
+      logger.warn({ err, driverId }, 'Failed to resolve driver active trip');
+    }
+    if (handshakeTripId && handshakeTripId !== activeTripId) {
+      logger.warn(
+        { driverId, handshakeTripId, activeTripId },
+        'Ignoring handshake tripId — does not match driver’s active trip in Redis',
+      );
+    }
+    if (activeTripId) {
+      await socket.join(`trip:${activeTripId}`);
+      socket.data.activeTripId = activeTripId;
+      logger.debug({ driverId, activeTripId }, 'Driver joined trip room');
     }
 
     // 3. Register all event handlers

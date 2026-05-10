@@ -81,6 +81,19 @@ export async function getDriverMeta(
   return redis.hgetall(metaKey(driverId));
 }
 
+/**
+ * Returns the socketId currently registered as the driver's live connection,
+ * or null if none is recorded. Used by the disconnect handler to avoid evicting
+ * a driver from the geo index when a *stale* socket disconnects after a newer
+ * one has already taken over (mobile-network reconnect race).
+ */
+export async function getDriverSocketId(
+  driverId: string,
+): Promise<string | null> {
+  const redis = getRedisDataClient();
+  return redis.hget(metaKey(driverId), 'socketId');
+}
+
 // ─── Active trip references ───────────────────────────────────────────────────
 
 export async function getDriverActiveTrip(driverId: string): Promise<string | null> {
@@ -104,4 +117,9 @@ export async function clearDriverActiveTrip(driverId: string): Promise<void> {
 export async function getRiderActiveTrip(riderId: string): Promise<string | null> {
   const redis = getRedisDataClient();
   return redis.get(activeTripRiderKey(riderId));
+}
+
+export async function clearRiderActiveTrip(riderId: string): Promise<void> {
+  const redis = getRedisDataClient();
+  await redis.del(activeTripRiderKey(riderId));
 }
