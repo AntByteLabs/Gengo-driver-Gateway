@@ -11,6 +11,8 @@ const tripOfferSchema = z.object({
   tripId: z.string(),
   riderId: z.string(),
   riderName: z.string(),
+  riderPhone: z.string().optional(),
+  riderRating: z.number().optional(),
   pickup: z.object({
     lat: z.number(),
     lng: z.number(),
@@ -27,6 +29,7 @@ const tripOfferSchema = z.object({
   vehicleType: z.string(),
   expiresInSec: z.number(),
   issuedAt: z.number(),
+  adminBooked: z.boolean().optional(),
 });
 
 // ─── Pattern matching ─────────────────────────────────────────────────────────

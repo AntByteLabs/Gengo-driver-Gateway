@@ -14,6 +14,8 @@ export interface TripOffer {
   tripId: string;
   riderId: string;
   riderName: string;
+  riderPhone?: string;
+  riderRating?: number;
   pickup: { lat: number; lng: number; address: string };
   dropoff: { lat: number; lng: number; address: string };
   distanceKm: number;
@@ -22,6 +24,10 @@ export interface TripOffer {
   vehicleType: string;
   expiresInSec: number;
   issuedAt: number;
+  /** True when the trip originated from the admin manual-booking flow.
+   *  Driver apps must hide the counter-offer UI for these offers — they
+   *  are accept-at-fare only, no negotiation. */
+  adminBooked?: boolean;
 }
 
 // ─── Kafka trip event shapes ──────────────────────────────────────────────────

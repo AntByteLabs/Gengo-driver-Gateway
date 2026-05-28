@@ -16,6 +16,10 @@ import { sendKafkaMessage } from '../infrastructure/kafka.js';
 interface DriverSocketData {
   driverId: string;
   activeTripId?: string;
+  /** Set when the driver emits `driver:online` so subsequent heartbeats can
+   *  forward vehicleType to the Kafka location topic — without it,
+   *  location-svc's UpsertAvailable wipes the meta hash on every tick. */
+  vehicleType?: string;
 }
 
 // ─── Zod schemas for incoming payloads ───────────────────────────────────────
@@ -58,6 +62,9 @@ export function registerDriverHandlers(
       return;
     }
     const { vehicleType } = result.data;
+    // Remember on this socket so every heartbeat can include it in the
+    // Kafka payload that location-svc consumes.
+    socket.data.vehicleType = vehicleType;
 
     try {
       // GEOADD with 0,0 placeholder — first real location update will correct it
@@ -66,6 +73,7 @@ export function registerDriverHandlers(
 
       await sendKafkaMessage(config.KAFKA_TOPIC_DRIVER_LOCATION, driverId, {
         driverId,
+        vehicleType,
         lat: 0,
         lng: 0,
         status: 'available',
@@ -78,26 +86,45 @@ export function registerDriverHandlers(
     }
   });
 
-  // ── driver:location ───────────────────────────────────────────────────────
+  // ── driver:location / driver:location_update ──────────────────────────────
+  // The mobile clients emit `driver:location_update` per FRONTEND_INTEGRATION
+  // §D1; an older variant sent `driver:location`. Subscribe to both so a
+  // version mismatch doesn't silently strand drivers at (0,0).
+  //
+  // The payload may include a `status` field per the spec; the gateway
+  // doesn't currently change behaviour based on it, but we pass it through
+  // to Kafka so location-svc can demote on_trip drivers correctly later.
+  const locationUpdateSchema = driverLocationSchema.extend({
+    status: z.enum(['AVAILABLE', 'ON_TRIP', 'OFFLINE', 'available', 'on_trip', 'offline']).optional(),
+    timestamp: z.number().optional(),
+  });
 
-  socket.on('driver:location', async (raw: unknown) => {
-    const result = driverLocationSchema.safeParse(raw);
+  const handleLocation = async (raw: unknown, eventName: string) => {
+    const result = locationUpdateSchema.safeParse(raw);
     if (!result.success) {
-      logger.warn({ driverId, errors: result.error.flatten() }, 'driver:location validation failed');
+      logger.warn({ driverId, eventName, errors: result.error.flatten() }, 'driver location validation failed');
       return;
     }
-    const { lat, lng, heading } = result.data;
+    const { lat, lng, heading, status: rawStatus } = result.data;
+    // Normalise to lowercase for the rest of the pipeline; location-svc and
+    // the matcher both expect 'available' (lowercase).
+    const status = rawStatus ? rawStatus.toLowerCase() : 'available';
 
     try {
       await updateDriverLastSeen(driverId);
 
-      // Publish location update to Kafka
+      // Publish location update to Kafka. CRITICAL: include vehicleType so
+      // location-svc's UpsertAvailable doesn't overwrite the meta hash with
+      // an empty string — that wipe is what causes the matcher to skip the
+      // driver regardless of how close they are to the rider.
+      const vehicleType = socket.data.vehicleType;
       await sendKafkaMessage(config.KAFKA_TOPIC_DRIVER_LOCATION, driverId, {
         driverId,
         lat,
         lng,
         ...(heading !== undefined && { heading }),
-        status: 'available',
+        ...(vehicleType ? { vehicleType } : {}),
+        status,
         ts: Date.now(),
       });
 
@@ -113,9 +140,12 @@ export function registerDriverHandlers(
         });
       }
     } catch (err) {
-      logger.error({ err, driverId }, 'Error handling driver:location');
+      logger.error({ err, driverId, eventName }, 'Error handling driver location');
     }
-  });
+  };
+
+  socket.on('driver:location', (raw: unknown) => { void handleLocation(raw, 'driver:location'); });
+  socket.on('driver:location_update', (raw: unknown) => { void handleLocation(raw, 'driver:location_update'); });
 
   // ── chat:message ──────────────────────────────────────────────────────────
 

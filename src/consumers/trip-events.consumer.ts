@@ -75,6 +75,39 @@ const bargainOfferSchema = z.object({
   }),
 });
 
+// Rider counter-back — same payload shape as bargain_offer, forwarded to
+// the *driver* socket so the driver can respond again. Re-using the wire
+// shape keeps the driver UI's bargain logic symmetric.
+const counterBackSchema = z.object({
+  type: z.literal('trip.counter_back'),
+  payload: z.object({
+    tripId: z.string(),
+    offerId: z.string(),
+    driverId: z.string(),
+    driverName: z.string().optional().default(''),
+    driverRating: z.number().optional().default(5),
+    vehicle: z.string().optional().default(''),
+    plate: z.string().optional().default(''),
+    distanceKm: z.number().optional().default(0),
+    offerFareNPR: z.number(),
+    expiresAt: z.number(),
+    issuedAt: z.number(),
+  }),
+});
+
+// Rider explicitly rejected a driver's proposed counter — drop the offer
+// card on the driver's UI without waiting for natural expiry.
+const offerRejectedSchema = z.object({
+  type: z.literal('trip.offer_rejected'),
+  payload: z.object({
+    tripId: z.string(),
+    offerId: z.string(),
+    driverId: z.string(),
+    riderId: z.string(),
+    ts: z.number(),
+  }),
+});
+
 const notificationOutboxSchema = z.object({
   type: z.string(),
   payload: z.object({
@@ -133,9 +166,20 @@ function handleTripEvent(
 ): void {
   // Bargain offers ride the same topic but have a different payload shape;
   // route on the discriminator before validating against the lifecycle schema.
-  if (typeof raw === 'object' && raw !== null && (raw as { type?: string }).type === 'trip.bargain_offer') {
-    handleBargainOffer(raw, riderNsp);
-    return;
+  if (typeof raw === 'object' && raw !== null) {
+    const type = (raw as { type?: string }).type;
+    if (type === 'trip.bargain_offer') {
+      handleBargainOffer(raw, riderNsp);
+      return;
+    }
+    if (type === 'trip.counter_back') {
+      handleCounterBack(raw, driverNsp);
+      return;
+    }
+    if (type === 'trip.offer_rejected') {
+      handleOfferRejected(raw, driverNsp);
+      return;
+    }
   }
 
   const result = tripEventSchema.safeParse(raw);
@@ -183,6 +227,37 @@ function handleTripEvent(
     });
   }
 
+  // ── Status-transition + notification fan-out ─────────────────────────────
+  // The lifecycle status update above already broadcast `trip:status` to
+  // every socket in the trip room. We additionally emit a per-side explicit
+  // event for actions the UI binds to directly — easier than every screen
+  // having to parse the generic status enum. Targeted to the side that
+  // *receives* the notification (driver-arrived → rider's UI, rider-
+  // approaching → driver's UI, etc.).
+  if (event.type === 'trip.driver_arrived') {
+    riderNsp.to(`trip:${tripId}`).emit('trip:driver_arrived', {
+      tripId, driverId, ts, meta: { eventId },
+    });
+  } else if (event.type === 'trip.rider_approaching' && driverId) {
+    driverNsp.to(`driver:${driverId}`).emit('trip:rider_approaching', {
+      tripId, riderId, ts, meta: { eventId },
+    });
+    driverNsp.to(`trip:${tripId}`).emit('trip:rider_approaching', {
+      tripId, riderId, ts, meta: { eventId },
+    });
+  } else if (event.type === 'trip.started') {
+    riderNsp.to(`trip:${tripId}`).emit('trip:started', { tripId, driverId, ts, meta: { eventId } });
+    if (driverId) driverNsp.to(`driver:${driverId}`).emit('trip:started', { tripId, driverId, ts, meta: { eventId } });
+  } else if (event.type === 'trip.completed') {
+    riderNsp.to(`trip:${tripId}`).emit('trip:completed', { tripId, driverId, ts, meta: { eventId } });
+    if (driverId) driverNsp.to(`driver:${driverId}`).emit('trip:completed', { tripId, driverId, ts, meta: { eventId } });
+  } else if (event.type === 'trip.fare_bumped') {
+    // Rider already gets the HTTP response synchronously; the broadcast is
+    // mostly for visibility into the trip room (admin debug panels, future
+    // co-rider devices).
+    riderNsp.to(`trip:${tripId}`).emit('trip:fare_bumped', { tripId, ts, meta: { eventId } });
+  }
+
   // End-of-trip teardown — once the ride is over, chat must stop working.
   // Three things have to happen:
   //   1. Every socket sitting in `trip:{tripId}` is forced to leave that
@@ -214,6 +289,39 @@ function handleBargainOffer(raw: unknown, riderNsp: Namespace): void {
     meta: { eventId: offerId },
   });
   logger.debug({ tripId, offerId }, 'Forwarded bargain offer to rider');
+}
+
+// Rider's counter-back arrives at the driver as a fresh `trip:counter_back`
+// event carrying a new offerId. The driver's UI shows it and the driver
+// responds via the existing /offers/:id/respond endpoint.
+function handleCounterBack(raw: unknown, driverNsp: Namespace): void {
+  const result = counterBackSchema.safeParse(raw);
+  if (!result.success) {
+    logger.warn({ errors: result.error.flatten() }, 'trip.counter_back validation failed');
+    return;
+  }
+  const { driverId, offerId, tripId } = result.data.payload;
+  driverNsp.to(`driver:${driverId}`).emit('trip:counter_back', {
+    ...result.data.payload,
+    meta: { eventId: offerId },
+  });
+  logger.debug({ tripId, offerId, driverId }, 'Forwarded counter_back to driver');
+}
+
+// Rider explicitly rejected the driver's counter. Tell the driver so the
+// offer card can be removed.
+function handleOfferRejected(raw: unknown, driverNsp: Namespace): void {
+  const result = offerRejectedSchema.safeParse(raw);
+  if (!result.success) {
+    logger.warn({ errors: result.error.flatten() }, 'trip.offer_rejected validation failed');
+    return;
+  }
+  const { driverId, offerId, tripId } = result.data.payload;
+  driverNsp.to(`driver:${driverId}`).emit('trip:offer_rejected', {
+    ...result.data.payload,
+    meta: { eventId: offerId },
+  });
+  logger.debug({ tripId, offerId, driverId }, 'Forwarded offer_rejected to driver');
 }
 
 async function teardownTripRoom(
