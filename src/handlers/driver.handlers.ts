@@ -108,7 +108,18 @@ export function registerDriverHandlers(
     const { lat, lng, heading, status: rawStatus } = result.data;
     // Normalise to lowercase for the rest of the pipeline; location-svc and
     // the matcher both expect 'available' (lowercase).
-    const status = rawStatus ? rawStatus.toLowerCase() : 'available';
+    let status = rawStatus ? rawStatus.toLowerCase() : 'available';
+    // A location heartbeat is proof the driver's socket is live, so they are
+    // online by definition. The online/offline lifecycle is owned by
+    // `driver:online` and the disconnect handler — never by a per-tick status
+    // field. Some clients stamp every heartbeat with "offline", which made
+    // location-svc ZREM the driver from `drivers:available:geo`, so the matcher
+    // found "no nearby drivers" and no offer ever reached the driver side.
+    // Treat a heartbeat "offline" as available (or on_trip when the gateway
+    // knows the driver is mid-trip) instead of evicting them.
+    if (status === 'offline') {
+      status = socket.data.activeTripId ? 'on_trip' : 'available';
+    }
 
     try {
       await updateDriverLastSeen(driverId);
