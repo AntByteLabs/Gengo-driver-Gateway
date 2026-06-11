@@ -1,4 +1,4 @@
-import { Kafka, Producer, Consumer, CompressionTypes, logLevel } from 'kafkajs';
+import { Kafka, Producer, Consumer, logLevel } from 'kafkajs';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
@@ -18,9 +18,15 @@ let _producer: Producer | null = null;
 
 export async function getKafkaProducer(): Promise<Producer> {
   if (!_producer) {
+    // This producer only carries driver location/presence beats
+    // (KAFKA_TOPIC_DRIVER_LOCATION) — lossy-tolerant, high-frequency events.
+    // `idempotent` is deliberately NOT set: it forces acks=-1 (full ISR ack)
+    // on every send, which serializes the hot location path against broker
+    // replication. If trip-critical events ever need to flow through this
+    // gateway, create a SEPARATE producer with idempotent/acks=-1 semantics
+    // rather than re-hardening this one.
     _producer = kafka.producer({
       allowAutoTopicCreation: false,
-      idempotent: true,
     });
     await _producer.connect();
     logger.info('Kafka producer connected');
@@ -63,6 +69,10 @@ export async function closeKafkaConsumer(): Promise<void> {
 
 // ─── Helper: send a single message ───────────────────────────────────────────
 
+// Tuned for small, lossy-tolerant location/presence payloads:
+// - acks: 1 (leader only) — no full-ISR wait per beat.
+// - no compression — GZIP on a ~150-byte JSON payload costs CPU for nothing.
+// Do not use this helper for events that must survive broker failover.
 export async function sendKafkaMessage(
   topic: string,
   key: string,
@@ -71,7 +81,7 @@ export async function sendKafkaMessage(
   const producer = await getKafkaProducer();
   await producer.send({
     topic,
-    compression: CompressionTypes.GZIP,
+    acks: 1,
     messages: [{ key, value: JSON.stringify(value) }],
   });
 }

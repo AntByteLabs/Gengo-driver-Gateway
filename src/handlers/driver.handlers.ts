@@ -7,9 +7,10 @@ import {
   geoRemoveDriver,
   setDriverOnline,
   setDriverOffline,
-  updateDriverLastSeen,
 } from '../services/geo.service.js';
 import { sendKafkaMessage } from '../infrastructure/kafka.js';
+import { getDriverApprovalStatus } from '../services/approval.service.js';
+import { ackFail, ackOk } from './chat-ack.js';
 
 // ─── Extended socket.data type for the driver namespace ──────────────────────
 
@@ -34,7 +35,7 @@ const driverLocationSchema = z.object({
   heading: z.number().finite().optional(),
 });
 
-const chatMessageSchema = z.object({
+const chatSendSchema = z.object({
   tripId: z.string().min(1),
   text: z.string().min(1).max(2000),
 });
@@ -62,6 +63,30 @@ export function registerDriverHandlers(
       return;
     }
     const { vehicleType } = result.data;
+
+    // ── Approval gate ────────────────────────────────────────────────────
+    // Only KYC-approved drivers may enter the available pool. driver-svc is
+    // the source of truth ("is this user allowed to drive?" is a domain
+    // question, not a JWT question — CLAUDE.md §5.4); the answer is cached
+    // in Redis for 5 minutes. Fail closed: if approval can't be verified,
+    // the driver does not go online.
+    const rawToken: unknown = socket.handshake.auth?.token;
+    const approval = await getDriverApprovalStatus(
+      driverId,
+      typeof rawToken === 'string' ? rawToken : '',
+    );
+    if (approval !== 'APPROVED') {
+      logger.warn({ driverId, approval }, 'driver:online rejected — driver not approved');
+      driverNsp.to(socket.id).emit('driver:error', {
+        code: 'DRIVER_NOT_APPROVED',
+        message:
+          approval === null
+            ? 'Could not verify driver approval. Please try again shortly.'
+            : 'Your driver account is not approved yet. Complete KYC and wait for approval.',
+      });
+      return;
+    }
+
     // Remember on this socket so every heartbeat can include it in the
     // Kafka payload that location-svc consumes.
     socket.data.vehicleType = vehicleType;
@@ -122,14 +147,19 @@ export function registerDriverHandlers(
     }
 
     try {
-      await updateDriverLastSeen(driverId);
+      // No direct lastSeen HSET here: location-svc's consumer writes
+      // `lastSeen` (from the event's `ts`) into the same `drivers:meta:` hash
+      // on every beat, so the gateway-side write was a redundant serial
+      // Redis round-trip on the hottest path in the service.
 
       // Publish location update to Kafka. CRITICAL: include vehicleType so
       // location-svc's UpsertAvailable doesn't overwrite the meta hash with
       // an empty string — that wipe is what causes the matcher to skip the
       // driver regardless of how close they are to the rider.
+      // Fire-and-forget: location beats are lossy-tolerant, and awaiting the
+      // produce inline made each socket handler block on broker RTT.
       const vehicleType = socket.data.vehicleType;
-      await sendKafkaMessage(config.KAFKA_TOPIC_DRIVER_LOCATION, driverId, {
+      sendKafkaMessage(config.KAFKA_TOPIC_DRIVER_LOCATION, driverId, {
         driverId,
         lat,
         lng,
@@ -137,6 +167,8 @@ export function registerDriverHandlers(
         ...(vehicleType ? { vehicleType } : {}),
         status,
         ts: Date.now(),
+      }).catch((err) => {
+        logger.error({ err, driverId, eventName }, 'Failed to publish driver location to Kafka');
       });
 
       // If driver has an active trip, forward location to the trip room in /rider namespace
@@ -158,23 +190,52 @@ export function registerDriverHandlers(
   socket.on('driver:location', (raw: unknown) => { void handleLocation(raw, 'driver:location'); });
   socket.on('driver:location_update', (raw: unknown) => { void handleLocation(raw, 'driver:location_update'); });
 
-  // ── chat:message ──────────────────────────────────────────────────────────
+  // ── chat:send ─────────────────────────────────────────────────────────────
+  // Mirror of rider.handlers.ts: incoming `chat:send`, outgoing `trip:update`
+  // with `eventType: 'CHAT'` so both sides ride the same trip-room envelope.
+  // (The old `chat:message` handler was removed: no client ever emitted it,
+  // it trusted the client-supplied tripId with no membership check, and it
+  // relayed an event name riders don't listen to.)
 
-  socket.on('chat:message', async (raw: unknown) => {
-    const result = chatMessageSchema.safeParse(raw);
+  socket.on('chat:send', async (raw: unknown, ack?: unknown) => {
+    const result = chatSendSchema.safeParse(raw);
     if (!result.success) {
-      logger.warn({ driverId, errors: result.error.flatten() }, 'chat:message validation failed');
+      logger.warn({ driverId, errors: result.error.flatten() }, 'chat:send validation failed');
+      ackFail(ack, 'invalid_payload');
       return;
     }
     const { tripId, text } = result.data;
 
-    // Real-time relay only — never persist
-    riderNsp.to(`trip:${tripId}`).emit('chat:message', {
+    // The tripId comes from the client payload, but the only trip a driver
+    // is allowed to chat in is the one Redis paired them with at connect
+    // time (or via the trip-events consumer). The consumer wipes
+    // activeTripId the moment the trip ends — so chat dies with the ride.
+    const activeTripId = socket.data.activeTripId;
+    if (!activeTripId || tripId !== activeTripId) {
+      logger.warn(
+        { driverId, payloadTripId: tripId, activeTripId },
+        'chat:send dropped — driver is not paired with that trip',
+      );
+      ackFail(ack, 'not_paired');
+      return;
+    }
+
+    const ts = Date.now();
+    const id = `m-${ts}-${driverId.slice(-6)}`;
+    const envelope = {
       tripId,
-      from: 'driver',
-      text,
-      ts: Date.now(),
-    });
+      eventType: 'CHAT' as const,
+      payload: { id, from: 'driver' as const, text },
+      ts,
+    };
+
+    // Relay to the rider side of the trip room, plus any other driver-side
+    // sockets in the same room (excluding the sender, whose UI already
+    // shows the message optimistically).
+    riderNsp.to(`trip:${tripId}`).emit('trip:update', envelope);
+    socket.to(`trip:${tripId}`).emit('trip:update', envelope);
+
+    ackOk(ack);
   });
 
   // ── disconnect ────────────────────────────────────────────────────────────

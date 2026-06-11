@@ -9,6 +9,10 @@ const envSchema = z.object({
   REDIS_URL: z.string().url().default('redis://localhost:6379'),
   REDIS_PUBSUB_URL: z.string().url().default('redis://localhost:6379'),
 
+  // driver-svc base URL — used to verify a driver's KYC approval status
+  // before letting them into the available pool on `driver:online`.
+  DRIVER_SVC_URL: z.string().url().default('http://driver-svc:3004'),
+
   KAFKA_BROKERS: z
     .string()
     .default('localhost:9092')
