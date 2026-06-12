@@ -27,6 +27,17 @@ interface DriverSocketData {
 
 const driverOnlineSchema = z.object({
   vehicleType: z.string().min(1),
+  // Optional preferred-route corridor. When present, trip-svc only offers the
+  // driver rides whose pickup is within the admin-configured distance of the
+  // line between origin and destination.
+  preferredRoute: z
+    .object({
+      originLat: z.number().finite(),
+      originLng: z.number().finite(),
+      destLat: z.number().finite(),
+      destLng: z.number().finite(),
+    })
+    .optional(),
 });
 
 const driverLocationSchema = z.object({
@@ -62,7 +73,10 @@ export function registerDriverHandlers(
       logger.warn({ driverId, errors: result.error.flatten() }, 'driver:online validation failed');
       return;
     }
-    const { vehicleType } = result.data;
+    const { vehicleType, preferredRoute } = result.data;
+    const routeMeta = preferredRoute
+      ? `${preferredRoute.originLat},${preferredRoute.originLng};${preferredRoute.destLat},${preferredRoute.destLng}`
+      : '';
 
     // ── Approval gate ────────────────────────────────────────────────────
     // Only KYC-approved drivers may enter the available pool. driver-svc is
@@ -94,7 +108,7 @@ export function registerDriverHandlers(
     try {
       // GEOADD with 0,0 placeholder — first real location update will correct it
       await geoAddDriver(driverId, 0, 0);
-      await setDriverOnline(driverId, vehicleType, socket.id);
+      await setDriverOnline(driverId, vehicleType, socket.id, routeMeta);
 
       await sendKafkaMessage(config.KAFKA_TOPIC_DRIVER_LOCATION, driverId, {
         driverId,

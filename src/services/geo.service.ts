@@ -39,6 +39,11 @@ export async function setDriverOnline(
   driverId: string,
   vehicleType: string,
   socketId: string,
+  /** Optional preferred-route corridor "oLat,oLng;dLat,dLng". When the driver
+   *  picks a route at go-online, trip-svc's matcher only offers them rides
+   *  whose pickup falls within the configured corridor. Empty/absent clears
+   *  any route from a prior session so it doesn't silently constrain them. */
+  route?: string,
 ): Promise<void> {
   const redis = getRedisDataClient();
   await redis.hset(metaKey(driverId), {
@@ -46,6 +51,7 @@ export async function setDriverOnline(
     status: 'available',
     socketId,
     lastSeen: Date.now().toString(),
+    route: route ?? '',
   });
 }
 
