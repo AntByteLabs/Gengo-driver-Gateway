@@ -25,6 +25,11 @@ const tripOfferSchema = z.object({
   }),
   distanceKm: z.number(),
   estimatedFareNPR: z.number(),
+  // Fair-price classification (P5.2). Optional so older trip-svc builds that
+  // don't emit them still validate; forwarded verbatim to the driver socket.
+  fareClass: z.enum(['low', 'fair', 'high']).optional(),
+  typicalMinNPR: z.number().optional(),
+  typicalMaxNPR: z.number().optional(),
   paymentMethod: z.string(),
   vehicleType: z.string(),
   expiresInSec: z.number(),

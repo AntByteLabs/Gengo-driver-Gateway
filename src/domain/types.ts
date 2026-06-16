@@ -20,6 +20,11 @@ export interface TripOffer {
   dropoff: { lat: number; lng: number; address: string };
   distanceKm: number;
   estimatedFareNPR: number;
+  /** Fair-price classification (P5.2) of the rider's offered fare against the
+   *  fair estimate. Optional — absent on older trip-svc builds. */
+  fareClass?: 'low' | 'fair' | 'high';
+  typicalMinNPR?: number;
+  typicalMaxNPR?: number;
   paymentMethod: string;
   vehicleType: string;
   expiresInSec: number;
