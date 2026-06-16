@@ -26,7 +26,16 @@ export function setupDriverNamespace(io: Server): Namespace {
     // Lazy-resolve rider namespace — both namespaces are set up independently
     const riderNsp = io.of('/rider');
 
-    // 1. Join personal room
+    // Register handlers FIRST. The mobile client emits `driver:online`
+    // immediately on connect; registering after the awaited joins below would
+    // drop that event (the driver silently never enters the available pool, so
+    // no ride offers ever reach them — a real "rides not coming" failure under
+    // a slow Redis / cold gateway). Handlers read socket.data.activeTripId
+    // lazily at event time, by which point the join has set it.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    registerDriverHandlers(socket as any, driverNsp, riderNsp);
+
+    // 1. Join personal room (to receive dispatch offers)
     await socket.join(`driver:${driverId}`);
 
     // 2. Rejoin active trip room. Redis is the source of truth — the
@@ -53,10 +62,6 @@ export function setupDriverNamespace(io: Server): Namespace {
       socket.data.activeTripId = activeTripId;
       logger.debug({ driverId, activeTripId }, 'Driver joined trip room');
     }
-
-    // 3. Register all event handlers
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    registerDriverHandlers(socket as any, driverNsp, riderNsp);
   });
 
   return driverNsp;

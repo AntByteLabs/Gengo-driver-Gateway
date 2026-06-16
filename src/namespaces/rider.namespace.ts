@@ -25,6 +25,12 @@ export function setupRiderNamespace(io: Server): Namespace {
     // Lazy-resolve driver namespace
     const driverNsp = io.of('/driver');
 
+    // Register handlers FIRST so any event the client emits right on connect
+    // isn't dropped while we await the room joins below (same race the driver
+    // namespace had). Handlers read socket.data.activeTripId lazily.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    registerRiderHandlers(socket as any, driverNsp);
+
     // 1. Join personal room
     await socket.join(`rider:${riderId}`);
 
@@ -51,10 +57,6 @@ export function setupRiderNamespace(io: Server): Namespace {
       socket.data.activeTripId = tripId;
       logger.debug({ riderId, tripId }, 'Rider joined trip room');
     }
-
-    // 3. Register all event handlers
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    registerRiderHandlers(socket as any, driverNsp);
   });
 
   return riderNsp;
