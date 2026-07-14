@@ -51,6 +51,8 @@ const tripEventSchema = z.object({
     driverId: z.string().optional(),
     driverName: z.string().optional(),
     status: z.string(),
+    // Cancellation cause (e.g. 'no_drivers_available') forwarded to the rider.
+    reason: z.string().optional(),
     ts: z.number().optional(),
   }).passthrough(),
 });
@@ -189,7 +191,7 @@ function handleTripEvent(
   }
 
   const event = result.data as KafkaTripEvent;
-  const { tripId, riderId, driverId, driverName, status } = event.payload;
+  const { tripId, riderId, driverId, driverName, status, reason } = event.payload;
   const ts = event.payload.ts ?? Date.now();
   // Carry the upstream eventId if trip-svc supplied one; otherwise mint a
   // local one so every emit has a traceable id for debugging.
@@ -199,12 +201,14 @@ function handleTripEvent(
       : undefined;
   const eventId = upstreamEventId ?? randomUUID();
 
-  // Emit trip:status to all riders in the trip room
+  // Emit trip:status to all riders in the trip room. `reason` rides along on
+  // cancellations so the rider app can show a specific message (e.g. no drivers).
   riderNsp.to(`trip:${tripId}`).emit('trip:status', {
     tripId,
     status,
     driverId,
     driverName,
+    ...(reason ? { reason } : {}),
     ts,
     meta: { eventId },
   });

@@ -57,6 +57,22 @@ adapterSubClient.on('error', (err: Error) =>
   logger.error({ err }, 'Socket.io Redis adapter sub error'),
 );
 
+// Verify the adapter's Redis is actually reachable before wiring it. Without
+// this, a Redis outage at boot leaves the gateway "healthy" while cross-instance
+// socket delivery silently fails (events emitted on one pod never reach clients
+// on another). Fail fast instead — the gateway depends on Redis to scale.
+try {
+  await Promise.race([
+    adapterPubClient.ping(),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Redis ping timed out after 5s')), 5_000),
+    ),
+  ]);
+} catch (err) {
+  logger.fatal({ err }, 'Socket.io Redis adapter unreachable at startup — exiting');
+  process.exit(1);
+}
+
 io.adapter(createAdapter(adapterPubClient, adapterSubClient));
 
 // ─── Namespace setup ──────────────────────────────────────────────────────────

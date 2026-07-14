@@ -53,6 +53,8 @@ export interface KafkaTripEvent {
     driverId?: string;
     driverName?: string;
     status: TripStatus;
+    /** Cancellation cause (e.g. 'no_drivers_available') forwarded to the rider. */
+    reason?: string;
     ts: number;
     [key: string]: unknown;
   };

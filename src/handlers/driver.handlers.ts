@@ -27,6 +27,11 @@ interface DriverSocketData {
 
 const driverOnlineSchema = z.object({
   vehicleType: z.string().min(1),
+  // Optional current GPS fix. When the client sends it, we register the driver
+  // at their REAL location immediately instead of the (0,0) placeholder — so
+  // the matcher can find them before their first location heartbeat lands.
+  lat: z.number().finite().optional(),
+  lng: z.number().finite().optional(),
   // Optional preferred-route corridor. When present, trip-svc only offers the
   // driver rides whose pickup is within the admin-configured distance of the
   // line between origin and destination.
@@ -73,7 +78,12 @@ export function registerDriverHandlers(
       logger.warn({ driverId, errors: result.error.flatten() }, 'driver:online validation failed');
       return;
     }
-    const { vehicleType, preferredRoute } = result.data;
+    const { vehicleType, preferredRoute, lat, lng } = result.data;
+    // Use the client's real fix when present and non-zero; otherwise fall back
+    // to the (0,0) placeholder that the first location heartbeat will correct.
+    const hasFix = lat !== undefined && lng !== undefined && (lat !== 0 || lng !== 0);
+    const onlineLat = hasFix ? lat : 0;
+    const onlineLng = hasFix ? lng : 0;
     const routeMeta = preferredRoute
       ? `${preferredRoute.originLat},${preferredRoute.originLng};${preferredRoute.destLat},${preferredRoute.destLng}`
       : '';
@@ -106,20 +116,21 @@ export function registerDriverHandlers(
     socket.data.vehicleType = vehicleType;
 
     try {
-      // GEOADD with 0,0 placeholder — first real location update will correct it
-      await geoAddDriver(driverId, 0, 0);
+      // Register at the driver's real fix when the client sent one; otherwise a
+      // (0,0) placeholder that the first location heartbeat will correct.
+      await geoAddDriver(driverId, onlineLat, onlineLng);
       await setDriverOnline(driverId, vehicleType, socket.id, routeMeta);
 
       await sendKafkaMessage(config.KAFKA_TOPIC_DRIVER_LOCATION, driverId, {
         driverId,
         vehicleType,
-        lat: 0,
-        lng: 0,
+        lat: onlineLat,
+        lng: onlineLng,
         status: 'available',
         ts: Date.now(),
       });
 
-      logger.info({ driverId, vehicleType }, 'Driver came online');
+      logger.info({ driverId, vehicleType, hasFix }, 'Driver came online');
     } catch (err) {
       logger.error({ err, driverId }, 'Error handling driver:online');
     }
@@ -252,15 +263,15 @@ export function registerDriverHandlers(
     ackOk(ack);
   });
 
-  // ── disconnect ────────────────────────────────────────────────────────────
-
-  socket.on('disconnect', async (reason) => {
-    logger.info({ driverId, reason }, 'Driver disconnected');
-
+  // Remove this driver from the available pool: drop from the Redis geo-set,
+  // mark meta offline, and emit an offline location event so location-svc and
+  // the matcher converge immediately. Shared by the explicit driver:offline
+  // handler and the socket disconnect handler (the only two ways a driver
+  // leaves the pool) so the sequence has a single source of truth.
+  const removeFromPool = async (context: string): Promise<void> => {
     try {
       await geoRemoveDriver(driverId);
       await setDriverOffline(driverId);
-
       await sendKafkaMessage(config.KAFKA_TOPIC_DRIVER_LOCATION, driverId, {
         driverId,
         lat: 0,
@@ -269,7 +280,26 @@ export function registerDriverHandlers(
         ts: Date.now(),
       });
     } catch (err) {
-      logger.error({ err, driverId }, 'Error handling driver disconnect');
+      logger.error({ err, driverId }, `Error handling ${context}`);
     }
+  };
+
+  // ── driver:offline ──────────────────────────────────────────────────────────
+  // Explicit "go offline" — the driver tapped the shift toggle but keeps the
+  // socket open (so they can still browse the open-rides feed while off duty).
+  // This is the ONLY driver-initiated way to leave the available pool short of
+  // disconnecting: a location heartbeat stamped "offline" is deliberately
+  // coerced back to available/on_trip above (buggy clients stamp every beat
+  // that way), so we must NOT overload location for the lifecycle signal.
+  socket.on('driver:offline', async () => {
+    logger.info({ driverId }, 'Driver went offline (explicit)');
+    await removeFromPool('driver:offline');
+  });
+
+  // ── disconnect ────────────────────────────────────────────────────────────
+
+  socket.on('disconnect', async (reason) => {
+    logger.info({ driverId, reason }, 'Driver disconnected');
+    await removeFromPool('driver disconnect');
   });
 }
