@@ -7,6 +7,7 @@ import { config } from './config.js';
 import { logger } from './logger.js';
 import { setupDriverNamespace } from './namespaces/driver.namespace.js';
 import { setupRiderNamespace } from './namespaces/rider.namespace.js';
+import { createLocationPingRoute } from './handlers/location-ping.route.js';
 import { startTripEventsConsumer } from './consumers/trip-events.consumer.js';
 import { startOfferConsumer } from './consumers/offer.consumer.js';
 import { closeRedisDataClient } from './infrastructure/redis.js';
@@ -81,6 +82,12 @@ io.adapter(createAdapter(adapterPubClient, adapterSubClient));
 // sibling namespace lazily at event time (avoids forward-reference issues).
 const driverNsp = setupDriverNamespace(io);
 const riderNsp = setupRiderNamespace(io);
+
+// ─── HTTP: background location ping ───────────────────────────────────────────
+// Registered after the rider namespace exists so the route can forward into
+// trip rooms. This is the only stateful HTTP route; health/readiness above are
+// probes. See location-ping.route for why it exists (backgrounded on-trip app).
+app.post('/v1/driver/location-ping', createLocationPingRoute(riderNsp));
 
 // ─── Kafka consumers ──────────────────────────────────────────────────────────
 

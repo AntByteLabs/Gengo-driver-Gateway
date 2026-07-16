@@ -8,6 +8,7 @@ import {
   setDriverOffline,
 } from '../services/geo.service.js';
 import { sendKafkaMessage } from '../infrastructure/kafka.js';
+import { ingestDriverLocation } from '../services/location-ingest.js';
 import { getDriverApprovalStatus } from '../services/approval.service.js';
 import { ackFail, ackOk } from './chat-ack.js';
 
@@ -204,41 +205,21 @@ export function registerDriverHandlers(
     }
 
     try {
-      // No direct lastSeen HSET here: location-svc's consumer writes
-      // `lastSeen` (from the event's `ts`) into the same `drivers:meta:` hash
-      // on every beat, so the gateway-side write was a redundant serial
-      // Redis round-trip on the hottest path in the service.
-
-      // Publish location update to Kafka. CRITICAL: include vehicleType so
-      // location-svc's UpsertAvailable doesn't overwrite the meta hash with
-      // an empty string — that wipe is what causes the matcher to skip the
-      // driver regardless of how close they are to the rider.
-      // Fire-and-forget: location beats are lossy-tolerant, and awaiting the
-      // produce inline made each socket handler block on broker RTT.
-      const vehicleType = socket.data.vehicleType;
-      sendKafkaMessage(config.KAFKA_TOPIC_DRIVER_LOCATION, driverId, {
+      // No direct lastSeen HSET here: location-svc's consumer writes `lastSeen`
+      // (from the event's `ts`) into the same `drivers:meta:` hash on every beat,
+      // so a gateway-side write would be a redundant serial Redis round-trip on
+      // the hottest path. CRITICAL: pass vehicleType so location-svc's
+      // UpsertAvailable doesn't wipe the meta hash's vehicleType to empty — that
+      // wipe is what makes the matcher skip an otherwise-nearby driver.
+      ingestDriverLocation(riderNsp, {
         driverId,
+        activeTripId: socket.data.activeTripId ?? null,
         lat,
         lng,
-        ...(heading !== undefined && { heading }),
-        ...(vehicleType ? { vehicleType } : {}),
+        heading,
+        vehicleType: socket.data.vehicleType,
         status,
-        ts: Date.now(),
-      }).catch((err) => {
-        logger.error({ err, driverId, eventName }, 'Failed to publish driver location to Kafka');
       });
-
-      // If driver has an active trip, forward location to the trip room in /rider namespace
-      const activeTripId = socket.data.activeTripId;
-      if (activeTripId) {
-        riderNsp.to(`trip:${activeTripId}`).emit('driver:location', {
-          tripId: activeTripId,
-          lat,
-          lng,
-          ...(heading !== undefined && { heading }),
-          ts: Date.now(),
-        });
-      }
     } catch (err) {
       logger.error({ err, driverId, eventName }, 'Error handling driver location');
     }
