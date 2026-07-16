@@ -19,15 +19,6 @@ function activeTripRiderKey(riderId: string): string {
 
 // ─── Geo operations ───────────────────────────────────────────────────────────
 
-export async function geoAddDriver(
-  driverId: string,
-  lat: number,
-  lng: number,
-): Promise<void> {
-  const redis = getRedisDataClient();
-  await redis.geoadd(GEO_KEY, lng, lat, driverId);
-}
-
 export async function geoRemoveDriver(driverId: string): Promise<void> {
   const redis = getRedisDataClient();
   await redis.zrem(GEO_KEY, driverId);
@@ -35,8 +26,24 @@ export async function geoRemoveDriver(driverId: string): Promise<void> {
 
 // ─── Driver metadata ──────────────────────────────────────────────────────────
 
-export async function setDriverOnline(
+/**
+ * Register a driver into the AVAILABLE pool: write the meta hash (which stamps
+ * lastSeen) AND add them to the geo set, as ONE MULTI so the two land together.
+ *
+ * The ordering and atomicity both matter. location-svc's SweepStale evicts a
+ * geo entry that has no lastSeen as an orphan; issuing the HSET and GEOADD as
+ * two separate round-trips left a window where a just-onlined driver sat in the
+ * geo set without meta and could be reaped mid-registration. A single MULTI
+ * closes that window entirely — the sweep, on its own connection, cannot
+ * interleave between the queued commands — and saves a round-trip on every
+ * (re)connect. Mirrors location-svc's UpsertAvailable (one pipelined GeoAdd +
+ * HSet). HSET is queued first purely for readability; MULTI applies them as a
+ * unit regardless.
+ */
+export async function registerAvailableDriver(
   driverId: string,
+  lat: number,
+  lng: number,
   vehicleType: string,
   socketId: string,
   /** Optional preferred-route corridor "oLat,oLng;dLat,dLng". When the driver
@@ -46,13 +53,17 @@ export async function setDriverOnline(
   route?: string,
 ): Promise<void> {
   const redis = getRedisDataClient();
-  await redis.hset(metaKey(driverId), {
-    vehicleType,
-    status: 'available',
-    socketId,
-    lastSeen: Date.now().toString(),
-    route: route ?? '',
-  });
+  await redis
+    .multi()
+    .hset(metaKey(driverId), {
+      vehicleType,
+      status: 'available',
+      socketId,
+      lastSeen: Date.now().toString(),
+      route: route ?? '',
+    })
+    .geoadd(GEO_KEY, lng, lat, driverId)
+    .exec();
 }
 
 export async function setDriverOffline(driverId: string): Promise<void> {

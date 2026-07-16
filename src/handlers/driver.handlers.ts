@@ -3,9 +3,8 @@ import type { Namespace, Socket } from 'socket.io';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import {
-  geoAddDriver,
+  registerAvailableDriver,
   geoRemoveDriver,
-  setDriverOnline,
   setDriverOffline,
 } from '../services/geo.service.js';
 import { sendKafkaMessage } from '../infrastructure/kafka.js';
@@ -104,15 +103,14 @@ export function registerDriverHandlers(
     }
 
     const { vehicleType, preferredRoute, lat, lng } = result.data;
-    // Use the client's real fix when present, non-zero, AND within the range
-    // Redis GEOADD accepts (lat ±85.05112878, lng ±180); an out-of-range value
-    // would make GEOADD throw and drop the driver into the (0,0) fallback via
-    // the catch below anyway, so reject it up front and log it as suspicious.
-    const hasFix =
-      lat !== undefined && lng !== undefined &&
-      (lat !== 0 || lng !== 0) &&
-      isValidGeo(lat, lng);
-    if (lat !== undefined && lng !== undefined && (lat !== 0 || lng !== 0) && !hasFix) {
+    // Use the client's real fix only when they sent usable-looking coords AND
+    // those coords are within the range Redis GEOADD accepts (lat ±85.05112878,
+    // lng ±180). An out-of-range value would make GEOADD throw, so we reject it
+    // up front, fall back to the (0,0) placeholder the first heartbeat corrects,
+    // and log the suspicious fix.
+    const hasCoords = lat !== undefined && lng !== undefined && (lat !== 0 || lng !== 0);
+    const hasFix = hasCoords && isValidGeo(lat, lng);
+    if (hasCoords && !hasFix) {
       logger.warn({ driverId, lat, lng }, 'driver:online: out-of-range coordinate — using placeholder');
     }
     const onlineLat = hasFix ? lat : 0;
@@ -149,16 +147,11 @@ export function registerDriverHandlers(
     socket.data.vehicleType = vehicleType;
 
     try {
-      // Write the meta hash (which stamps lastSeen) BEFORE adding to the geo
-      // set. location-svc's SweepStale treats a geo entry with no lastSeen as an
-      // orphan and evicts it immediately; if we GEOADD first, a sweep landing in
-      // the gap between the two calls would reap a driver who just came online.
-      // Meta-first guarantees any driver visible in the geo set already has a
-      // fresh lastSeen. If the GEOADD then fails, the driver is simply not yet
-      // matchable and their first heartbeat adds them — a benign self-healing
-      // state, unlike the reverse ordering which loses a live driver.
-      await setDriverOnline(driverId, vehicleType, socket.id, routeMeta);
-      await geoAddDriver(driverId, onlineLat, onlineLng);
+      // Meta hash + geo-set entry land together in one MULTI: location-svc's
+      // SweepStale evicts a geo entry with no lastSeen as an orphan, so the two
+      // must be atomic or a sweep landing between them could reap a just-onlined
+      // driver. See registerAvailableDriver.
+      await registerAvailableDriver(driverId, onlineLat, onlineLng, vehicleType, socket.id, routeMeta);
 
       await sendKafkaMessage(config.KAFKA_TOPIC_DRIVER_LOCATION, driverId, {
         driverId,
