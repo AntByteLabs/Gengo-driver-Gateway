@@ -1,10 +1,8 @@
 import type { Request, Response } from 'express';
 import type { Namespace } from 'socket.io';
-import jwt from 'jsonwebtoken';
 import { z } from 'zod';
-import { config } from '../config.js';
 import { logger } from '../logger.js';
-import type { JwtPayload } from '../domain/types.js';
+import { TokenError, verifyBearerToken } from '../middleware/verify-token.js';
 import { getDriverActiveTrip, getDriverMeta } from '../services/geo.service.js';
 import { ingestDriverLocation } from '../services/location-ingest.js';
 
@@ -31,22 +29,11 @@ const pingSchema = z.object({
  */
 export function createLocationPingRoute(riderNsp: Namespace) {
   return async (req: Request, res: Response): Promise<void> => {
-    const raw = req.headers.authorization;
-    if (typeof raw !== 'string' || !raw.startsWith('Bearer ')) {
-      res.status(401).json({ error: 'AUTH_MISSING_TOKEN' });
-      return;
-    }
-
     let driverId: string;
     try {
-      const decoded = jwt.verify(raw.slice(7).trim(), config.JWT_SECRET) as JwtPayload;
-      if (!decoded.sub) {
-        res.status(401).json({ error: 'AUTH_INVALID_CLAIMS' });
-        return;
-      }
-      driverId = decoded.sub;
-    } catch {
-      res.status(401).json({ error: 'AUTH_INVALID_TOKEN' });
+      driverId = verifyBearerToken(req.headers.authorization).sub;
+    } catch (err) {
+      res.status(401).json({ error: err instanceof TokenError ? err.code : 'AUTH_INVALID_TOKEN' });
       return;
     }
 
