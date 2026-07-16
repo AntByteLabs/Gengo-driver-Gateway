@@ -56,6 +56,19 @@ const chatSendSchema = z.object({
   text: z.string().min(1).max(2000),
 });
 
+// Redis GEOADD accepts latitude only within the Web-Mercator-valid band
+// ±85.05112878 and longitude within ±180. A value outside that (e.g. a spoofed
+// or garbage fix) makes GEOADD throw; guarding here keeps the driver in a clean
+// (0,0) fallback instead of an unhandled error mid-registration.
+const MAX_GEO_LAT = 85.05112878;
+function isValidGeo(lat: number, lng: number): boolean {
+  return (
+    Number.isFinite(lat) && Number.isFinite(lng) &&
+    lat >= -MAX_GEO_LAT && lat <= MAX_GEO_LAT &&
+    lng >= -180 && lng <= 180
+  );
+}
+
 // ─── Handler registration ─────────────────────────────────────────────────────
 
 export function registerDriverHandlers(
@@ -78,10 +91,30 @@ export function registerDriverHandlers(
       logger.warn({ driverId, errors: result.error.flatten() }, 'driver:online validation failed');
       return;
     }
+    // On-trip guard: a driver mid-trip must never be (re)added to the AVAILABLE
+    // pool. The app emits driver:online on every socket (re)connect, so without
+    // this a network blip during a ride would re-list the driver as available
+    // and the matcher could offer them a second trip. socket.data.activeTripId
+    // is the same signal the heartbeat uses; it's cleared on terminal by the
+    // trip-events consumer. Their live-trip location still forwards to the rider
+    // room via the heartbeat handler — this only keeps them out of dispatch.
+    if (socket.data.activeTripId) {
+      logger.info({ driverId, tripId: socket.data.activeTripId }, 'driver:online ignored — on an active trip');
+      return;
+    }
+
     const { vehicleType, preferredRoute, lat, lng } = result.data;
-    // Use the client's real fix when present and non-zero; otherwise fall back
-    // to the (0,0) placeholder that the first location heartbeat will correct.
-    const hasFix = lat !== undefined && lng !== undefined && (lat !== 0 || lng !== 0);
+    // Use the client's real fix when present, non-zero, AND within the range
+    // Redis GEOADD accepts (lat ±85.05112878, lng ±180); an out-of-range value
+    // would make GEOADD throw and drop the driver into the (0,0) fallback via
+    // the catch below anyway, so reject it up front and log it as suspicious.
+    const hasFix =
+      lat !== undefined && lng !== undefined &&
+      (lat !== 0 || lng !== 0) &&
+      isValidGeo(lat, lng);
+    if (lat !== undefined && lng !== undefined && (lat !== 0 || lng !== 0) && !hasFix) {
+      logger.warn({ driverId, lat, lng }, 'driver:online: out-of-range coordinate — using placeholder');
+    }
     const onlineLat = hasFix ? lat : 0;
     const onlineLng = hasFix ? lng : 0;
     const routeMeta = preferredRoute
@@ -116,10 +149,16 @@ export function registerDriverHandlers(
     socket.data.vehicleType = vehicleType;
 
     try {
-      // Register at the driver's real fix when the client sent one; otherwise a
-      // (0,0) placeholder that the first location heartbeat will correct.
-      await geoAddDriver(driverId, onlineLat, onlineLng);
+      // Write the meta hash (which stamps lastSeen) BEFORE adding to the geo
+      // set. location-svc's SweepStale treats a geo entry with no lastSeen as an
+      // orphan and evicts it immediately; if we GEOADD first, a sweep landing in
+      // the gap between the two calls would reap a driver who just came online.
+      // Meta-first guarantees any driver visible in the geo set already has a
+      // fresh lastSeen. If the GEOADD then fails, the driver is simply not yet
+      // matchable and their first heartbeat adds them — a benign self-healing
+      // state, unlike the reverse ordering which loses a live driver.
       await setDriverOnline(driverId, vehicleType, socket.id, routeMeta);
+      await geoAddDriver(driverId, onlineLat, onlineLng);
 
       await sendKafkaMessage(config.KAFKA_TOPIC_DRIVER_LOCATION, driverId, {
         driverId,
