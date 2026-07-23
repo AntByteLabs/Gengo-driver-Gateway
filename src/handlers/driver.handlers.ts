@@ -10,6 +10,7 @@ import {
 import { sendKafkaMessage } from '../infrastructure/kafka.js';
 import { ingestDriverLocation } from '../services/location-ingest.js';
 import { getDriverApprovalStatus } from '../services/approval.service.js';
+import { isChatClosed } from '../services/chat-window.service.js';
 import { ackFail, ackOk } from './chat-ack.js';
 
 // ─── Extended socket.data type for the driver namespace ──────────────────────
@@ -255,6 +256,13 @@ export function registerDriverHandlers(
         'chat:send dropped — driver is not paired with that trip',
       );
       ackFail(ack, 'not_paired');
+      return;
+    }
+
+    // Contact closes when the ride starts (trip → IN_PROGRESS). Pairing alone
+    // outlives that (it clears only at terminal), so enforce the window here.
+    if (await isChatClosed(tripId)) {
+      ackFail(ack, 'chat_closed');
       return;
     }
 

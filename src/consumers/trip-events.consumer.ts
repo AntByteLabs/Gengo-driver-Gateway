@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { Namespace } from 'socket.io';
 import { getKafkaConsumer } from '../infrastructure/kafka.js';
 import { getRedisDataClient } from '../infrastructure/redis.js';
+import { closeChatForTrip, clearChatWindow } from '../services/chat-window.service.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import {
@@ -213,6 +214,12 @@ function handleTripEvent(
     meta: { eventId },
   });
 
+  // Rider↔driver contact closes the moment the ride starts. Mark it server-side
+  // so chat:send is rejected from here on, even across a client reconnect.
+  if (status === 'IN_PROGRESS') {
+    void closeChatForTrip(tripId);
+  }
+
   // If it's a cancellation also notify driver with generic event
   if (event.type === 'TRIP_CANCELLED' && driverId) {
     driverNsp.to(`driver:${driverId}`).emit('event', {
@@ -360,6 +367,7 @@ async function teardownTripRoom(
     await Promise.all([
       clearRiderActiveTrip(riderId).catch(() => {}),
       driverId ? clearDriverActiveTrip(driverId).catch(() => {}) : Promise.resolve(),
+      clearChatWindow(tripId),
     ]);
     logger.info({ tripId, riderId, driverId }, 'Tore down trip room after terminal status');
   } catch (err) {

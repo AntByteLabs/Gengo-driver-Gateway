@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Namespace, Socket } from 'socket.io';
 import { ackFail, ackOk } from './chat-ack.js';
+import { isChatClosed } from '../services/chat-window.service.js';
 import { logger } from '../logger.js';
 
 // ─── Extended socket.data type for the rider namespace ───────────────────────
@@ -59,6 +60,13 @@ export function registerRiderHandlers(
         'chat:send dropped — rider is not paired with that trip',
       );
       ackFail(ack, 'not_paired');
+      return;
+    }
+
+    // Contact closes when the ride starts (trip → IN_PROGRESS). Pairing alone
+    // outlives that (it clears only at terminal), so enforce the window here.
+    if (await isChatClosed(tripId)) {
+      ackFail(ack, 'chat_closed');
       return;
     }
 
